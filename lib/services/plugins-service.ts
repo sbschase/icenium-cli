@@ -12,23 +12,34 @@ export class PluginsService implements IPluginsService {
 	private static CORE_PLUGINS_PROPERTY_NAME = "CorePlugins";
 	private static CORDOVA_PLUGIN_VARIABLES_PROPERTY_NAME = "CordovaPluginVariables";
 	private static MESSAGES = ["Core Plugins", "Advanced Plugins", "Marketplace Plugins"];
-	private identifierToPlugin: IDictionary<IPlugin>;
+	private _identifierToPlugin: IDictionary<IPlugin>;
+	private get identifierToPlugin(): IDictionary<IPlugin> {
+		if (!this._identifierToPlugin) {
+			this.loadPluginsData().wait();	
+		}
 
-	constructor($cordovaPluginsService: ICordovaPluginsService,
-		$marketplacePluginsService: ICordovaPluginsService,
+		return this._identifierToPlugin;
+	}
+
+	constructor(private $cordovaPluginsService: ICordovaPluginsService,
+		private $marketplacePluginsService: ICordovaPluginsService,
 		private $errors: IErrors,
 		private $logger: ILogger,
 		private $project: Project.IProject,
 		private $prompter: IPrompter,
 		private $loginManager: ILoginManager,
 		private $projectConstants: Project.IProjectConstants) {
+	}
 
-		// Cordova plugin commands are only applicable to Cordova projects
-		this.$project.ensureCordovaProject();
-		this.$loginManager.ensureLoggedIn().wait();
-		this.identifierToPlugin = Object.create(null);
-		Future.wait([this.createPluginsData($cordovaPluginsService),
-			this.createPluginsData($marketplacePluginsService)]);
+	private loadPluginsData(): IFuture<void> {
+		return (() => {
+			// Cordova plugin commands are only applicable to Cordova projects
+			this.$project.ensureCordovaProject();
+			this.$loginManager.ensureLoggedIn().wait();
+			this._identifierToPlugin = Object.create(null);
+			Future.wait([this.createPluginsData(this.$cordovaPluginsService),
+				this.createPluginsData(this.$marketplacePluginsService)]);
+		}).future<void>()();
 	}
 
 	public getInstalledPlugins(): IPlugin[] {
@@ -72,9 +83,9 @@ export class PluginsService implements IPluginsService {
 				this.$errors.fail("No plugin name specified");
 			}
 
-			let parts = pluginName.split("@");
-			pluginName = parts[0];
-			let version = parts[1];
+			let pluginBasicInfo = this.getPluginBasicInformation(pluginName);
+			pluginName = pluginBasicInfo.name;
+			let version = pluginBasicInfo.version;
 
 			let pluginNameToLowerCase = pluginName.toLowerCase();
 			if(!_.any(this.getAvailablePlugins(),(pl) => pl.data.Name.toLowerCase() === pluginNameToLowerCase || pl.data.Identifier.toLowerCase() === pluginNameToLowerCase)) {
@@ -184,6 +195,14 @@ export class PluginsService implements IPluginsService {
 		}).future<void>()();
 	}
 
+	public getPluginBasicInformation(pluginName: string): IBasicPluginInformation {
+		let result: IBasicPluginInformation = Object.create({});
+		let pluginParts = pluginName.split("@");
+		result.name = pluginParts[0];
+		result.version = pluginParts[1];
+		return result;
+	}
+
 	private getInstalledPluginByName(pluginName: string): IPlugin[] {
 		pluginName = pluginName.toLowerCase();
 		let installedPlugins = this.getInstalledPlugins();
@@ -276,7 +295,7 @@ export class PluginsService implements IPluginsService {
 								}
 							});
 
-							this.identifierToPlugin[projectDataRecord] = pluginData;
+							this._identifierToPlugin[projectDataRecord] = pluginData;
 						} else {
 							this.$logger.warn("Unable to fetch data for plugin %s.", plugin.Identifier);
 						}
@@ -327,7 +346,7 @@ export class PluginsService implements IPluginsService {
 		return plugin;
 	}
 
-	private getPluginVersions(pluginName: string): any[] {
+	public getPluginVersions(pluginName: string): IPluginVersion[] {
 		let toLowerCasePluginName = pluginName.toLowerCase();
 
 		let versions:any[] = [];
@@ -335,7 +354,11 @@ export class PluginsService implements IPluginsService {
 			if (plugin.data.Name.toLowerCase() === toLowerCasePluginName || plugin.data.Identifier.toLowerCase() === toLowerCasePluginName) {
 				let pluginVersionsData = (<IMarketplacePlugin>plugin).pluginVersionsData;
 				versions = _.map(pluginVersionsData.Versions, p => {
-					return { name: p.Version, value: p.Version };
+					let pluginVersion: IPluginVersion = Object.create({});
+					pluginVersion.name = p.Version
+					pluginVersion.value = p.Version
+					pluginVersion.minCordova = this.normalizeMinCordovaVersion(p.SupportedVersion);
+					return pluginVersion;
 				});
 				return false;
 			}
@@ -348,6 +371,10 @@ export class PluginsService implements IPluginsService {
 		return (() => {
 			return versions.length > 1 ? this.promptForVersionCore(pluginName, versions).wait() : versions[0].value;
 		}).future<string>()();
+	}
+
+	private normalizeMinCordovaVersion(version: string): string {
+		return _.startsWith(version, '>=') ? version.substr(2) : version;
 	}
 
 	private promptForVersionCore(pluginName: string, versions: any[]): IFuture<string> {

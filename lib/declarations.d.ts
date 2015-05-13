@@ -377,6 +377,8 @@ interface ICordovaMigrationService {
 	migratePlugins(plugins: string[], fromVersion: string, toVersion: string): IFuture<string[]>;
 	getSupportedFrameworks(): IFuture<Server.FrameworkVersion[]>;
 	getDisplayNameForVersion(version: string): IFuture<string>;
+	onFrameworkVersionChanging(newVersion: string): IFuture<void>;
+	onWPSdkVersionChanging(newVersion: string): IFuture<void>;
 }
 
 interface ISamplesService {
@@ -385,9 +387,9 @@ interface ISamplesService {
 }
 
 interface IExpress {
-    run(): void;
-    listen(port: number, callback?: Function): any;
-    post(route: string, callback: (req: any, res: any) => IFuture<void>): void;
+	run(): void;
+	listen(port: number, callback?: Function): any;
+	post(route: string, callback: (req: any, res: any) => IFuture<void>): void;
 }
 
 interface IDomainNameSystem {
@@ -407,6 +409,8 @@ interface IPluginsService {
 	removePlugin(pluginName: string): IFuture<void>;
 	configurePlugin(pluginName: string, configuration?: string): IFuture<void>;
 	isPluginInstalled(pluginName: string): boolean;
+	getPluginVersions(pluginName: string): IPluginVersion[];
+	getPluginBasicInformation(pluginName: string): IBasicPluginInformation
 }
 
 interface IPlugin {
@@ -417,9 +421,15 @@ interface IPlugin {
 	toProjectDataRecord(version?: string): string;
 }
 
+interface IPluginVersion {
+	name: string; 
+	value: string; 
+	minCordova: string;
+}
+
 interface IBasicPluginInformation {
 	name: string;
-	description: string;
+	description?: string;
 	version: string;
 }
 

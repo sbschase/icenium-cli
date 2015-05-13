@@ -4,6 +4,7 @@
 import Future = require("fibers/future");
 import path = require("path");
 import helpers = require("./../helpers");
+import util = require("util");
 
 class RenamedPlugin {
 	constructor(public version: string,
@@ -27,12 +28,21 @@ export class FrameworkVersion implements Server.FrameworkVersion {
 export class CordovaMigrationService implements ICordovaMigrationService {
 	private _migrationData: MigrationData;
 	private minSupportedVersion: string = "3.0.0";
+	private removedPluginsCache: string[] = [];
 	private cordovaMigrationFile: string = path.join(__dirname, "../../resources/Cordova", "cordova-migration-data.json");
 
 	constructor(private $fs: IFileSystem,
 		private $server: Server.IServer,
 		private $errors: IErrors,
-		private $loginManager:ILoginManager) {
+		private $logger: ILogger,
+		private $loginManager:ILoginManager,
+		private $mobileHelper: Mobile.IMobileHelper,
+		private $pluginsService: IPluginsService,
+		private $project: Project.IProject,
+		private $projectConstants: Project.IProjectConstants,
+		private $projectPropertiesService: IProjectPropertiesService,
+		private $prompter: IPrompter,
+		private $resources: IResourceLoader) {
 	}
 
 	private get migrationData(): IFuture<MigrationData> {
@@ -107,8 +117,25 @@ export class CordovaMigrationService implements ICordovaMigrationService {
 			});
 
 			let supportedPlugins = this.pluginsForVersion(toVersion).wait();
-			plugins = _.filter(plugins, plugin => _.contains(supportedPlugins, plugin));
+			plugins = _.filter(plugins, plugin => {
+				if (plugin.indexOf('@') > -1) {
+					let pluginBasicInfo = this.$pluginsService.getPluginBasicInformation(plugin);
+					if (this.isPluginSupported(pluginBasicInfo.name, pluginBasicInfo.version, toVersion)) {
+						supportedPlugins.push(plugin);
+					} else if (!_.find(this.removedPluginsCache, p => plugin)) {
+						let remove = `Remove ${plugin} from all configuration`;
+						let cancel = 'Cancel Cordova migration';
+						let choice = this.$prompter.promptForChoice(`Plugin ${plugin} is not supported for Cordova version ${toVersion} what do you want to do?`, [remove, cancel]).wait();
+						if (choice === cancel) {
+							this.$errors.failWithoutHelp("Cordova migration interrupted"); 
+						} else {
+							this.removedPluginsCache.push(plugin);
+						}
+					}
+				}
 
+				return _.contains(supportedPlugins, plugin);
+			});
 			return plugins;
 		}).future<string[]>()();
 	}
@@ -134,8 +161,132 @@ export class CordovaMigrationService implements ICordovaMigrationService {
 		}).future<void>()();
 	}
 
+	public onWPSdkVersionChanging(newVersion: string): IFuture<void> {
+		return ((): void => {
+			if(newVersion === this.$project.projectData["WPSdk"]) {
+				return;
+			}
+
+			let validWPSdks = this.getSupportedWPFrameworks().wait();
+			if(!_.contains(validWPSdks, newVersion)) {
+				this.$errors.failWithoutHelp("The selected version %s is not supported. Supported versions are %s", newVersion, validWPSdks.join(", "));
+			}
+
+			this.$logger.info("Migrating to WPSdk version %s", newVersion);
+			if(helpers.versionCompare(newVersion, "8.0") > 0) {
+				// at least Cordova 3.7 is required
+				if(helpers.versionCompare(this.$project.projectData.FrameworkVersion, "3.7.0") < 0) {
+					let cordovaVersions = this.getSupportedFrameworks().wait();
+
+					// Find last framework which is not experimental.
+					let selectedFramework = _.findLast(cordovaVersions, cv => cv.DisplayName.indexOf(this.$projectConstants.EXPERIMENTAL_TAG) === -1);
+					if(helpers.versionCompare(selectedFramework.Version, "3.7.0") < 0) {
+						// if latest stable framework version is below 3.7.0, find last 'Experimental'.
+						selectedFramework = _.findLast(cordovaVersions, cv => cv.DisplayName.indexOf(this.$projectConstants.EXPERIMENTAL_TAG) !== -1 && helpers.versionCompare("3.7.0", cv.Version) <= 0);
+					}
+
+					let shouldUpdateFramework = this.$prompter.confirm(`You cannot build with the Windows Phone ${newVersion} SDK with the currently selected target version of Apache Cordova. Do you want to switch to ${selectedFramework.DisplayName}?`).wait()
+					if(shouldUpdateFramework) {
+						this.onFrameworkVersionChanging(selectedFramework.Version).wait();
+						this.$project.projectData.FrameworkVersion = selectedFramework.Version;
+					} else {
+						this.$errors.failWithoutHelp("Unable to set Windows Phone %s as the target SDK. Migrate to Apache Cordova 3.7.0 or later and try again.", newVersion);
+					}
+				}
+			}
+		}).future<void>()();
+	}
+
+	public onFrameworkVersionChanging(newVersion: string): IFuture<void> {
+		return ((): void => {
+			if(newVersion === this.$project.projectData.FrameworkVersion) {
+				return;
+			}
+
+			this.$project.ensureAllPlatformAssets().wait();
+
+			if(this.$project.projectData.WPSdk && helpers.versionCompare(this.$project.projectData.WPSdk, "8.0") > 0 && helpers.versionCompare(newVersion, "3.7.0") < 0) {
+				let shouldUpdateWPSdk = this.$prompter.confirm(`You cannot build with the Windows Phone ${this.$project.projectData.WPSdk} SDK with the currently selected target version of Apache Cordova. Do you want to switch to Windows Phone 8.0 SDK?`).wait();
+				if(shouldUpdateWPSdk) {
+					this.onWPSdkVersionChanging("8.0").wait();
+					this.$project.projectData.WPSdk = "8.0";
+				} else {
+					this.$errors.failWithoutHelp("Unable to set %s as the target Apache Cordova version. Set the target Windows Phone SDK to 8.0 and try again.", newVersion);
+				}
+			}
+
+			let versionDisplayName = this.getDisplayNameForVersion(newVersion).wait();
+			this.$logger.info("Migrating to Cordova version %s", versionDisplayName);
+			let oldVersion = this.$project.projectData.FrameworkVersion;
+
+			_.each(this.$project.configurations, (configuration: string) => {
+				let oldPluginsList = this.$project.getProperty("CorePlugins", configuration);
+				let newPluginsList = this.migratePlugins(oldPluginsList, oldVersion, newVersion).wait();
+				this.$logger.trace("Migrated core plugins to: ", helpers.formatListOfNames(newPluginsList, "and"));
+				this.$project.setProperty("CorePlugins", newPluginsList, configuration);
+			});
+
+			let backedUpFiles: string[] = [],
+				backupSuffix = ".backup";
+			try {
+				_.each(this.$mobileHelper.platformNames, (platform) => {
+					this.$logger.trace("Replacing cordova.js file for %s platform ", platform);
+					let cordovaJsFileName = path.join(this.$project.getProjectDir().wait(), util.format("cordova.%s.js", platform).toLowerCase());
+					let cordovaJsSourceFilePath = this.$resources.buildCordovaJsFilePath(newVersion, platform);
+					this.$fs.copyFile(cordovaJsFileName, cordovaJsFileName + backupSuffix).wait();
+					backedUpFiles.push(cordovaJsFileName);
+					this.$fs.copyFile(cordovaJsSourceFilePath, cordovaJsFileName).wait();
+				});
+			} catch(error) {
+				_.each(backedUpFiles, file => {
+					this.$logger.trace("Reverting %s", file);
+					this.$fs.copyFile(file + backupSuffix, file).wait();
+				});
+				this.$errors.failWithoutHelp(error.message);
+			}
+			finally {
+				_.each(backedUpFiles, file => {
+					this.$fs.deleteFile(file + backupSuffix).wait();
+				});
+			}
+
+			this.$logger.info("Successfully migrated to version %s", versionDisplayName);
+		}).future<void>()();
+	}
+
+	public getSupportedPlugins(): IFuture<string[]> {
+		return (() => {
+			let version: string;
+			if(this.$project.projectData) {
+				version = this.$project.projectData.FrameworkVersion;
+			} else {
+				let selectedFramework = _.last(_.select(this.getSupportedFrameworks().wait(), (sv: Server.FrameworkVersion) => sv.DisplayName.indexOf(this.$projectConstants.EXPERIMENTAL_TAG) === -1));
+				version = selectedFramework.Version;
+			}
+
+			return this.pluginsForVersion(version).wait();
+		}).future<string[]>()();
+	}
+
+	private getSupportedWPFrameworks(): IFuture<string[]>{
+		return ((): string[]=> {
+			let validValues: string[] = [];
+			let projectSchema = this.$project.getProjectSchema().wait();
+			if(projectSchema) {
+				validValues = this.$projectPropertiesService.getValidValuesForProperty(projectSchema["WPSdk"]).wait();
+			}
+
+			return validValues;
+		}).future<string[]>()();
+	}
+
 	private parseMscorlibVersion(json: any): string {
 		return [json._Major, json._Minor, json._Build].join('.');
+	}
+
+	private isPluginSupported(plugin: string, version: string, migrationVersion: string): boolean {
+		var minCordovaVersion = _.find(this.$pluginsService.getPluginVersions(plugin), v => v.value === version).minCordova;
+		return helpers.versionCompare(minCordovaVersion, migrationVersion) !== 1;
 	}
 }
 $injector.register("cordovaMigrationService", CordovaMigrationService);
