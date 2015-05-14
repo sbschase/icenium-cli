@@ -385,9 +385,9 @@ interface ISamplesService {
 }
 
 interface IExpress {
-    run(): void;
-    listen(port: number, callback?: Function): any;
-    post(route: string, callback: (req: any, res: any) => IFuture<void>): void;
+	run(): void;
+	listen(port: number, callback?: Function): any;
+	post(route: string, callback: (req: any, res: any) => IFuture<void>): void;
 }
 
 interface IDomainNameSystem {
@@ -468,6 +468,7 @@ interface IAppManagerService {
 	upload(platform: string): IFuture<void>;
 	openAppManagerStore(): void;
 	publishLivePatch(platforms: string[]): IFuture<void>;
+	getGroups(): IFuture<void>;
 }
 
 interface IProgressIndicator {
