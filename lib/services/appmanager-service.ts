@@ -60,7 +60,12 @@ class AppManagerService implements IAppManagerService {
 				Groups: []
 			};
 
-			if (options.group.length) {
+			if (options.group) {
+
+				if(!_.isArray(options.group)) {
+                    options.group = [options.group];
+				}
+
 				publishSettings.Groups = this.findGroups(options.group).wait();
 			}
 
@@ -71,7 +76,7 @@ class AppManagerService implements IAppManagerService {
 	}
 
 	public getGroups(): IFuture<void> {
-		return ((): any  => {
+		return (() => {
 			this.$loginManager.ensureLoggedIn().wait();
 
 			this.$logger.info("Accessing Telerik AppManager store.");
@@ -84,8 +89,8 @@ class AppManagerService implements IAppManagerService {
 			}
 
 			let table = new Table({
-			head: ["Index", "Name"],
-			chars: {'mid': '', 'left-mid': '', 'mid-mid': '', 'right-mid': ''}
+				head: ["Index", "Name"],
+				chars: {'mid': '', 'left-mid': '', 'mid-mid': '', 'right-mid': ''}
 			});
 
 			_.forEach(groups, (group, index) => {
@@ -140,15 +145,14 @@ class AppManagerService implements IAppManagerService {
 	}
 
 	private findGroups(identityStrings:string[]): IFuture<string[]> {
-		return ((): any => {
+		return ((): string[] => {
 			let availableGroups = this.$server.tam.getGroups().wait();
-			let groupIds: string[] = [];
 
 			if (!availableGroups.length) {
 				this.$errors.failWithoutHelp("No available groups found.");
 			}
 
-			_.forEach(identityStrings, (identityStr, index) => {
+			return _.map(identityStrings, identityStr => {
 				let group = helpers.findByNameOrIndex(identityStr, availableGroups, (group) => group.Name);
 
 				if (!group) {
@@ -157,11 +161,8 @@ class AppManagerService implements IAppManagerService {
 						os.EOL);
 				}
 
-				groupIds.push(group.Id);
+				return group.Id;
 			});
-
-			return groupIds;
-			
 		}).future<string[]>()();
 	}
 }
