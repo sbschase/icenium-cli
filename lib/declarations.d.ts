@@ -410,7 +410,8 @@ interface IPluginsService {
 	configurePlugin(pluginName: string, configuration?: string): IFuture<void>;
 	isPluginInstalled(pluginName: string): boolean;
 	getPluginVersions(pluginName: string): IPluginVersion[];
-	getPluginBasicInformation(pluginName: string): IBasicPluginInformation
+	getPluginBasicInformation(pluginName: string): IBasicPluginInformation;
+	isPluginSupported(plugin: string, version: string, migrationVersion: string): boolean;
 }
 
 interface IPlugin {

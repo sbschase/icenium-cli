@@ -4,7 +4,6 @@
 import Future = require("fibers/future");
 import path = require("path");
 import helpers = require("./../helpers");
-import util = require("util");
 
 class RenamedPlugin {
 	constructor(public version: string,
@@ -120,24 +119,36 @@ export class CordovaMigrationService implements ICordovaMigrationService {
 			plugins = _.filter(plugins, plugin => {
 				if (plugin.indexOf('@') > -1) {
 					let pluginBasicInfo = this.$pluginsService.getPluginBasicInformation(plugin);
-					if (this.isPluginSupported(pluginBasicInfo.name, pluginBasicInfo.version, toVersion)) {
-						supportedPlugins.push(plugin);
+					if (this.$pluginsService.isPluginSupported(pluginBasicInfo.name, pluginBasicInfo.version, toVersion)) {
+						return true;
 					} else if (!_.find(this.removedPluginsCache, p => plugin)) {
-						let remove = `Remove ${plugin} from all configuration`;
-						let cancel = 'Cancel Cordova migration';
-						let choice = this.$prompter.promptForChoice(`Plugin ${plugin} is not supported for Cordova version ${toVersion} what do you want to do?`, [remove, cancel]).wait();
-						if (choice === cancel) {
-							this.$errors.failWithoutHelp("Cordova migration interrupted"); 
-						} else {
-							this.removedPluginsCache.push(plugin);
-						}
+						this.promptUserForInvalidPluginAction(plugin, toVersion);
 					}
 				}
 
-				return _.contains(supportedPlugins, plugin);
+				return _.contains(supportedPlugins, plugin) ? true : this.promptUserForInvalidPluginAction(plugin, toVersion).wait()
 			});
 			return plugins;
 		}).future<string[]>()();
+	}
+
+	private promptUserForInvalidPluginAction(plugin: string, toVersion: string): IFuture<Boolean> {
+		return (() => {
+			if (_.contains(this.removedPluginsCache, plugin)) {
+				return false;
+			}
+
+			let remove = `Remove ${plugin} from all configurations`;
+			let cancel = 'Cancel Cordova migration';
+			let choice = this.$prompter.promptForChoice(`Plugin ${plugin} is not supported for Cordova version ${toVersion} what do you want to do?`, [remove, cancel]).wait();
+			if (choice === cancel) {
+				this.$errors.failWithoutHelp("Cordova migration interrupted"); 
+			} else {
+				this.removedPluginsCache.push(plugin);
+			}
+
+			return false;
+		}).future<Boolean>()();
 	}
 
 	public downloadCordovaMigrationData(): IFuture<void> {
@@ -231,7 +242,7 @@ export class CordovaMigrationService implements ICordovaMigrationService {
 			try {
 				_.each(this.$mobileHelper.platformNames, (platform) => {
 					this.$logger.trace("Replacing cordova.js file for %s platform ", platform);
-					let cordovaJsFileName = path.join(this.$project.getProjectDir().wait(), util.format("cordova.%s.js", platform).toLowerCase());
+					let cordovaJsFileName = path.join(this.$project.getProjectDir().wait(), `cordova.${platform}.js`.toLowerCase());
 					let cordovaJsSourceFilePath = this.$resources.buildCordovaJsFilePath(newVersion, platform);
 					this.$fs.copyFile(cordovaJsFileName, cordovaJsFileName + backupSuffix).wait();
 					backedUpFiles.push(cordovaJsFileName);
@@ -282,11 +293,6 @@ export class CordovaMigrationService implements ICordovaMigrationService {
 
 	private parseMscorlibVersion(json: any): string {
 		return [json._Major, json._Minor, json._Build].join('.');
-	}
-
-	private isPluginSupported(plugin: string, version: string, migrationVersion: string): boolean {
-		var minCordovaVersion = _.find(this.$pluginsService.getPluginVersions(plugin), v => v.value === version).minCordova;
-		return helpers.versionCompare(minCordovaVersion, migrationVersion) !== 1;
 	}
 }
 $injector.register("cordovaMigrationService", CordovaMigrationService);

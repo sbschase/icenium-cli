@@ -203,6 +203,11 @@ export class PluginsService implements IPluginsService {
 		return result;
 	}
 
+	public isPluginSupported(plugin: string, version: string, migrationVersion: string): boolean {
+		var minCordovaVersion = _.find(this.getPluginVersions(plugin), v => v.value === version).minCordova;
+		return helpers.versionCompare(minCordovaVersion, migrationVersion) !== 1;
+	}
+
 	private getInstalledPluginByName(pluginName: string): IPlugin[] {
 		pluginName = pluginName.toLowerCase();
 		let installedPlugins = this.getInstalledPlugins();
